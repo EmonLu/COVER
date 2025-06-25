@@ -10,6 +10,7 @@ import yaml
 
 from cover.datasets import UnifiedFrameSampler, spatial_temporal_view_decomposition
 from cover.models import COVER
+import time
 
 mean, std = (
     torch.FloatTensor([123.675, 116.28, 103.53]),
@@ -45,9 +46,9 @@ if __name__ == "__main__":
     """
     BASIC SETTINGS
     """
-    torch.cuda.current_device()
-    torch.cuda.empty_cache()
-    torch.backends.cudnn.benchmark = True
+    # torch.cuda.current_device()
+    # torch.cuda.empty_cache()
+    # torch.backends.cudnn.benchmark = True
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     with open(args.opt, "r") as f:
        opt = yaml.safe_load(f)
@@ -66,15 +67,17 @@ if __name__ == "__main__":
     LOAD MODEL
     """    
     evaluator = COVER(**opt["model"]["args"]).to(device)
-    state_dict = torch.load(opt["test_load_path"], map_location=device)
+    state_dict = torch.load(opt["test_load_path"], map_location=device, weights_only=False)
     
     # set strict=False here to avoid error of missing
     # weight of prompt_learner in clip-iqa+, cross-gate
     evaluator.load_state_dict(state_dict['state_dict'], strict=False)
+    evaluator.eval()
 
     """
     TESTING
     """
+    t1 = time.time()
     views, _ = spatial_temporal_view_decomposition(
         args.video_path, dopt["sample_types"], temporal_samplers
     )
@@ -97,9 +100,26 @@ if __name__ == "__main__":
                 .transpose(0, 1)
                 .to(device)
             )
-
-    results = [r.mean().item() for r in evaluator(views)]
+    t2 = time.time()
+    print("sample views: {:.3f} s".format(t2 - t1))
+    results = [r.mean().item() for r in evaluator(views["semantic"], views["technical"], views["aesthetic"])]
+    t3 = time.time()
     pred_score = fuse_results(results)
     print(f"path, semantic score, technical score, aesthetic score, overall/final score")
     print(f'{args.video_path.split("/")[-1]},{pred_score["semantic"]:4f},{pred_score["technical"]:4f},{pred_score["aesthetic"]:4f},{pred_score["overall"]:4f}')
-
+    
+    print("sample views: {:.3f} s".format(t2 - t1))
+    print("pytorch inference: {:.3f} s".format(t3 - t2))
+    
+    # ## tuple_input=True 
+    # evaluator1 = COVER(**opt["model"]["args"], tuple_input=True).to(device)
+    # state_dict = torch.load(opt["test_load_path"], map_location=device, weights_only=False)
+    
+    # # set strict=False here to avoid error of missing
+    # # weight of prompt_learner in clip-iqa+, cross-gate
+    # evaluator1.load_state_dict(state_dict['state_dict'], strict=False)
+    # evaluator1.eval()
+    # results1 = [r.mean().item() for r in evaluator1(views)]
+    # pred_score1 = fuse_results(results1)
+    # print(f"path, semantic score, technical score, aesthetic score, overall/final score")
+    # print(f'{args.video_path.split("/")[-1]},{pred_score1["semantic"]:4f},{pred_score1["technical"]:4f},{pred_score1["aesthetic"]:4f},{pred_score1["overall"]:4f}')

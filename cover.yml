@@ -188,9 +188,9 @@ data:
                 semantic:
                     size_h: 512
                     size_w: 512
-                    clip_len: 20
+                    clip_len: 20    ## 一共要采样的帧数
                     frame_interval: 2
-                    t_frag: 20
+                    t_frag: 20      ## 视频被分割成t_frag个片段
                     num_clips: 1
                 technical:
                     fragments_h: 7
@@ -216,7 +216,7 @@ model:
         backbone:
             technical:
                 type: swin_tiny_grpb
-                checkpoint: true
+                checkpoint: false
                 pretrained:
             aesthetic:
                 type: conv_tiny
@@ -224,6 +224,7 @@ model:
                 type: clip_iqa+
         backbone_preserve_keys: technical,aesthetic,semantic
         divide_head: true
+        # tuple_input: true
         vqa_head:
             in_channels: 768
             hidden_channels: 64

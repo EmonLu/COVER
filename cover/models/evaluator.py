@@ -10,6 +10,7 @@ from .head import IQAHead, VARHead, VQAHead
 from .swin_backbone import SwinTransformer2D as ImageBackbone
 from .swin_backbone import SwinTransformer3D as VideoBackbone
 from .swin_backbone import swin_3d_small, swin_3d_tiny
+import time
 
 
 class BaseEvaluator(nn.Module):
@@ -44,6 +45,7 @@ class BaseEvaluator(nn.Module):
 class COVER(nn.Module):
     def __init__(
         self,
+        tuple_input=False,      ## as export onnx needs tuple input
         backbone_size="divided",
         backbone_preserve_keys="fragments,resize",
         multi=False,
@@ -58,9 +60,9 @@ class COVER(nn.Module):
         self.backbone_preserve_keys = backbone_preserve_keys.split(",")
         self.multi = multi
         self.layer = layer
+        self.tuple_input = tuple_input
         super().__init__()
         for key, hypers in backbone.items():
-            print(backbone_size)
             if key not in self.backbone_preserve_keys:
                 continue
             if backbone_size == "divided":
@@ -69,15 +71,15 @@ class COVER(nn.Module):
                 t_backbone_size = backbone_size
             if t_backbone_size == "swin_tiny":
                 b = swin_3d_tiny(**backbone[key])
-            elif t_backbone_size == "swin_tiny_grpb":
+            elif t_backbone_size == "swin_tiny_grpb":       ## for technical
                 # to reproduce fast-vqa
-                b = VideoBackbone()
+                b = VideoBackbone(use_checkpoint=False)
             elif t_backbone_size == "swin_tiny_grpb_m":
                 # to reproduce fast-vqa-m
                 b = VideoBackbone(window_size=(4, 4, 4), frag_biases=[0, 0, 0, 0])
             elif t_backbone_size == "swin_small":
                 b = swin_3d_small(**backbone[key])
-            elif t_backbone_size == "conv_tiny":
+            elif t_backbone_size == "conv_tiny":            ## for aethetic
                 b = convnext_3d_tiny(pretrained=True)
             elif t_backbone_size == "conv_small":
                 b = convnext_3d_small(pretrained=True)
@@ -87,11 +89,11 @@ class COVER(nn.Module):
                 b = convnextv2_3d_pico(pretrained=True)
             elif t_backbone_size == "xclip":
                 raise NotImplementedError
-            elif t_backbone_size == "clip_iqa+":
+            elif t_backbone_size == "clip_iqa+":        ## for semantic
                 b = clip_vitL14(pretrained=True)
             else:
                 raise NotImplementedError
-            print("Setting backbone:", key + "_backbone")
+            # print("Setting backbone:", key + "_backbone", b)
             setattr(self, key + "_backbone", b)
         if divide_head:
             for key in backbone:
@@ -99,7 +101,7 @@ class COVER(nn.Module):
                 if key not in self.backbone_preserve_keys:
                     continue
                 b = VQAHead(pre_pool=pre_pool, **vqa_head)
-                print("Setting head:", key + "_head")
+                # print("Setting head:", key + "_head", b)
                 setattr(self, key + "_head", b)
         else:
             if var:
@@ -112,7 +114,100 @@ class COVER(nn.Module):
         self.smtc_gate_aesc = CrossGatingBlock(x_features=768, num_channels=768, block_size=1, 
                               grid_size=1, upsample_y=False, dropout_rate=0.1, use_bias=True, use_global_mlp=False)
 
+    ## rewrite for onnx export and inference
     def forward(
+        self,
+        semantic, ## = vclips['semantic']
+        technical, ## = vclips['technical']
+        aesthetic, ## = vclips['aesthetic']
+        inference=True,
+        return_pooled_feats=False,
+        return_raw_feats=False,
+        reduce_scores=False,
+        pooled=False,
+        **kwargs
+    ):
+        # assert (return_pooled_feats & return_raw_feats) == False, "Please only choose one kind of features to return"
+        self.eval()
+        with torch.no_grad():
+            scores = []
+            feats = {}
+            times = {}
+            
+            ## ---------semantic branch---------------
+            start_time_semantic = time.time()
+            x = semantic.squeeze(0)
+            x = x.permute(1,0,2,3)
+            feat, _ = getattr(self, "semantic_backbone")(
+                x, multi=self.multi, layer=self.layer, **kwargs
+            )
+            # for image feature from clipiqa+ VIT14
+            # image feature shape (t, c) -> (16, 768)
+            feat = feat.permute(1,0).contiguous() # (c, t) -> (768, 16)
+            feat = feat.unsqueeze(-1).unsqueeze(-1) # (c, t, w, h) -> (768, 16, 1, 1)
+            feat_expand = feat.expand(-1, -1, 7, 7) # (c, t, w, h) -> (768, 16, 7, 7)
+            feat_expand = feat_expand.unsqueeze(0) # (b, c, t, w, h) -> (1, 768, 16, 7, 7)
+            if hasattr(self, "semantic_head"):
+                score = getattr(self, "semantic_head")(feat_expand)
+            else:
+                score = getattr(self, "vqa_head")(feat_expand)
+            scores += [score]
+            feats["semantic"] = feat_expand
+            end_time_semantic = time.time()
+            times['semantic'] = end_time_semantic - start_time_semantic
+            
+            ## ---------technical branch---------------
+            start_time_technical = time.time()
+            # if input is image, copy its data
+            if technical.shape[2] == 1:
+                x = torch.cat([technical, technical], dim=2)
+            else:
+                x = technical
+            feat = getattr(self, "technical_backbone")(
+                x, multi=self.multi, layer=self.layer, **kwargs
+            )
+            feat_gated = self.smtc_gate_tech(feats['semantic'], feat)
+            if hasattr(self, "technical_head"):
+                scores += [getattr(self, "technical_head")(feat_gated)]
+            else:
+                scores += [getattr(self, "vqa_head")(feat_gated)]
+            end_time_technical = time.time()
+            times['technical'] = end_time_technical - start_time_technical
+            
+            ## ---------aesthetic branch---------------
+            start_time_aesthetic = time.time()
+            # if input is image, copy its data
+            if aesthetic.shape[2] == 1:
+                x = torch.cat([aesthetic, aesthetic], dim=2)
+            else:
+                x = aesthetic
+            feat = getattr(self, "aesthetic_backbone")(
+                x, multi=self.multi, layer=self.layer, **kwargs
+            )
+            feat_gated = self.smtc_gate_aesc(feats['semantic'], feat)
+            if hasattr(self, "aesthetic_head"):
+                scores += [getattr(self, "aesthetic_head")(feat_gated)]
+            else:
+                scores += [getattr(self, "vqa_head")(feat_gated)]
+            end_time_aesthetic = time.time()
+            times['aesthetic'] = end_time_aesthetic - start_time_aesthetic
+            
+            for key, duration in times.items():
+                print(f"{key} branch execution time: {duration:.4f} seconds")
+        if reduce_scores:
+            if len(scores) > 1:
+                scores = reduce(lambda x, y: x + y, scores)
+            else:
+                scores = scores[0]
+            if pooled:
+                scores = torch.mean(scores, (1, 2, 3, 4))
+        self.train()
+        if return_pooled_feats or return_raw_feats:
+            return scores, feats
+        return scores
+        
+    ## backup for compare rewritten version(tuple_input) and original dictionary input
+    def forward_dict_input(
         self,
         vclips,
         inference=True,
@@ -128,49 +223,119 @@ class COVER(nn.Module):
             with torch.no_grad():
                 scores = []
                 feats = {}
-                for key in vclips:
-                    if key == 'technical' or key == 'aesthetic':
-                        # if input is image, copy its data
-                        if vclips[key].shape[2] == 1:
-                            x = torch.cat([vclips[key], vclips[key]], dim=2)
-                        else:
-                            x = vclips[key]
-                        feat = getattr(self, key.split("_")[0] + "_backbone")(
-                            x, multi=self.multi, layer=self.layer, **kwargs
-                        )
-                        if key == 'technical':
-                            feat_gated = self.smtc_gate_tech(feats['semantic'], feat)
-                        elif key == 'aesthetic':
-                            feat_gated = self.smtc_gate_aesc(feats['semantic'], feat)
-                        if hasattr(self, key.split("_")[0] + "_head"):
-                            scores += [getattr(self, key.split("_")[0] + "_head")(feat_gated)]
-                        else:
-                            scores += [getattr(self, "vqa_head")(feat_gated)]
-                    elif key == 'semantic':
-                        x = vclips[key].squeeze(0)
-                        x = x.permute(1,0,2,3)
-                        feat, _ = getattr(self, key.split("_")[0] + "_backbone")(
-                            x, multi=self.multi, layer=self.layer, **kwargs
-                        )
-                        # for image feature from clipiqa+ VIT14
-                        # image feature shape (t, c) -> (16, 768)
-                        feat = feat.permute(1,0).contiguous() # (c, t) -> (768, 16)
-                        feat = feat.unsqueeze(-1).unsqueeze(-1) # (c, t, w, h) -> (768, 16, 1, 1)
-                        feat_expand = feat.expand(-1, -1, 7, 7) # (c, t, w, h) -> (768, 16, 7, 7)
-                        feat_expand = feat_expand.unsqueeze(0) # (b, c, t, w, h) -> (1, 768, 16, 7, 7)
-                        if hasattr(self, key.split("_")[0] + "_head"):
-                            score = getattr(self, key.split("_")[0] + "_head")(feat_expand)
-                        else:
-                            score = getattr(self, "vqa_head")(feat_expand)
-                        scores += [score]
-                        feats[key] = feat_expand
-                if reduce_scores:
-                    if len(scores) > 1:
-                        scores = reduce(lambda x, y: x + y, scores)
+                if self.tuple_input:
+                    semantic = vclips['semantic']
+                    technical = vclips['technical']
+                    aesthetic = vclips['aesthetic']
+                    print(semantic.shape)
+                    print(technical.shape)
+                    print(aesthetic.shape)
+                    times = {}
+                    ## ---------semantic branch---------------
+                    start_time_semantic = time.time()
+                    x = semantic.squeeze(0)
+                    x = x.permute(1,0,2,3)
+                    feat, _ = getattr(self, "semantic_backbone")(
+                        x, multi=self.multi, layer=self.layer, **kwargs
+                    )
+                    # for image feature from clipiqa+ VIT14
+                    # image feature shape (t, c) -> (16, 768)
+                    feat = feat.permute(1,0).contiguous() # (c, t) -> (768, 16)
+                    feat = feat.unsqueeze(-1).unsqueeze(-1) # (c, t, w, h) -> (768, 16, 1, 1)
+                    feat_expand = feat.expand(-1, -1, 7, 7) # (c, t, w, h) -> (768, 16, 7, 7)
+                    feat_expand = feat_expand.unsqueeze(0) # (b, c, t, w, h) -> (1, 768, 16, 7, 7)
+                    if hasattr(self, "semantic_head"):
+                        score = getattr(self, "semantic_head")(feat_expand)
                     else:
-                        scores = scores[0]
-                    if pooled:
-                        scores = torch.mean(scores, (1, 2, 3, 4))
+                        score = getattr(self, "vqa_head")(feat_expand)
+                    scores += [score]
+                    feats["semantic"] = feat_expand
+                    end_time_semantic = time.time()
+                    times['semantic'] = end_time_semantic - start_time_semantic
+                    
+                    ## ---------technical branch---------------
+                    print("--------------technical-------------")
+                    start_time_technical = time.time()
+                    # if input is image, copy its data
+                    if technical.shape[2] == 1:
+                        x = torch.cat([technical, technical], dim=2)
+                    else:
+                        x = technical
+                    feat = getattr(self, "technical_backbone")(
+                        x, multi=self.multi, layer=self.layer, **kwargs
+                    )
+                    feat_gated = self.smtc_gate_tech(feats['semantic'], feat)
+                    if hasattr(self, "technical_head"):
+                        scores += [getattr(self, "technical_head")(feat_gated)]
+                    else:
+                        scores += [getattr(self, "vqa_head")(feat_gated)]
+                    end_time_technical = time.time()
+                    times['technical'] = end_time_technical - start_time_technical
+                    
+                    ## ---------aesthetic branch---------------
+                    start_time_aesthetic = time.time()
+                    # if input is image, copy its data
+                    if aesthetic.shape[2] == 1:
+                        x = torch.cat([aesthetic, aesthetic], dim=2)
+                    else:
+                        x = aesthetic
+                    feat = getattr(self, "aesthetic_backbone")(
+                        x, multi=self.multi, layer=self.layer, **kwargs
+                    )
+                    feat_gated = self.smtc_gate_aesc(feats['semantic'], feat)
+                    if hasattr(self, "aesthetic_head"):
+                        scores += [getattr(self, "aesthetic_head")(feat_gated)]
+                    else:
+                        scores += [getattr(self, "vqa_head")(feat_gated)]
+                    end_time_aesthetic = time.time()
+                    times['aesthetic'] = end_time_aesthetic - start_time_aesthetic
+                    
+                    for key, duration in times.items():
+                        print(f"{key} branch execution time: {duration:.4f} seconds")
+                else:
+                    for key in vclips:
+                        if key == 'technical' or key == 'aesthetic':
+                            # if input is image, copy its data
+                            if vclips[key].shape[2] == 1:
+                                x = torch.cat([vclips[key], vclips[key]], dim=2)
+                            else:
+                                x = vclips[key]
+                            feat = getattr(self, key.split("_")[0] + "_backbone")(
+                                x, multi=self.multi, layer=self.layer, **kwargs
+                            )
+                            if key == 'technical':
+                                feat_gated = self.smtc_gate_tech(feats['semantic'], feat)
+                            elif key == 'aesthetic':
+                                feat_gated = self.smtc_gate_aesc(feats['semantic'], feat)
+                            if hasattr(self, key.split("_")[0] + "_head"):
+                                scores += [getattr(self, key.split("_")[0] + "_head")(feat_gated)]
+                            else:
+                                scores += [getattr(self, "vqa_head")(feat_gated)]
+                        elif key == 'semantic':
+                            x = vclips[key].squeeze(0)
+                            x = x.permute(1,0,2,3)
+                            feat, _ = getattr(self, key.split("_")[0] + "_backbone")(
+                                x, multi=self.multi, layer=self.layer, **kwargs
+                            )
+                            # for image feature from clipiqa+ VIT14
+                            # image feature shape (t, c) -> (16, 768)
+                            feat = feat.permute(1,0).contiguous() # (c, t) -> (768, 16)
+                            feat = feat.unsqueeze(-1).unsqueeze(-1) # (c, t, w, h) -> (768, 16, 1, 1)
+                            feat_expand = feat.expand(-1, -1, 7, 7) # (c, t, w, h) -> (768, 16, 7, 7)
+                            feat_expand = feat_expand.unsqueeze(0) # (b, c, t, w, h) -> (1, 768, 16, 7, 7)
+                            if hasattr(self, key.split("_")[0] + "_head"):
+                                score = getattr(self, key.split("_")[0] + "_head")(feat_expand)
+                            else:
+                                score = getattr(self, "vqa_head")(feat_expand)
+                            scores += [score]
+                            feats[key] = feat_expand
+            if reduce_scores:
+                if len(scores) > 1:
+                    scores = reduce(lambda x, y: x + y, scores)
+                else:
+                    scores = scores[0]
+                if pooled:
+                    scores = torch.mean(scores, (1, 2, 3, 4))
             self.train()
             if return_pooled_feats or return_raw_feats:
                 return scores, feats
