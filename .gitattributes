@@ -1,3 +1,4 @@
 cover.xml filter=lfs diff=lfs merge=lfs -text
 onnx_model filter=lfs diff=lfs merge=lfs -text
 cover.bin filter=lfs diff=lfs merge=lfs -text
+pretrained_weights/COVER.pth filter=lfs diff=lfs merge=lfs -text
