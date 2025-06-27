@@ -24,6 +24,19 @@ def modify_yaml(file_path, seconds):
     # 修改 aesthetic 分支
     ytugc['aesthetic']['clip_len'] = seconds * 2
     ytugc['aesthetic']['t_frag'] = seconds
+    
+    # 修改 val-livevqc 下的相关值
+    ytugc = config['data']['val-livevqc']['args']['sample_types']
+    
+    ytugc['semantic']['clip_len'] = seconds
+    ytugc['semantic']['t_frag'] = seconds
+    
+    ytugc['technical']['aligned'] = seconds * 2
+    ytugc['technical']['clip_len'] = seconds * 2
+    ytugc['technical']['t_frag'] = seconds
+    
+    ytugc['aesthetic']['clip_len'] = seconds * 2
+    ytugc['aesthetic']['t_frag'] = seconds
 
     # 将修改后的配置写回 YAML 文件
     with open(file_path, 'w') as file:
