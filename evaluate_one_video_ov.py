@@ -11,6 +11,7 @@ import yaml
 from cover.datasets import UnifiedFrameSampler, spatial_temporal_view_decomposition
 from cover.models import COVER
 import time
+import openvino as ov 
 
 mean, std = (
     torch.FloatTensor([123.675, 116.28, 103.53]),
@@ -67,16 +68,13 @@ if __name__ == "__main__":
     """
     LOAD MODEL
     """    
-    evaluator = COVER(**opt["model"]["args"]).to(device)
-    state_dict = torch.load(opt["test_load_path"], map_location=device, weights_only=False)
-    
-    # set strict=False here to avoid error of missing
-    # weight of prompt_learner in clip-iqa+, cross-gate
-    evaluator.load_state_dict(state_dict['state_dict'], strict=False)
-    evaluator.eval()
+    core = ov.Core()
+    compiled_model = core.compile_model("cover.xml")
+    infer_request = compiled_model.create_infer_request()
+    print("Finish compiling model!")
 
     """
-    TESTING
+    VIEW SAMPLE
     """
     t1 = time.time()
     views, _ = spatial_temporal_view_decomposition(
@@ -99,30 +97,45 @@ if __name__ == "__main__":
                 .permute(3, 0, 1, 2)
                 .reshape(v.shape[0], num_clips, -1, *v.shape[2:])
                 .transpose(0, 1)
+                .squeeze(0)
                 .to(device)
             )
-    print(views['semantic'].shape)
-    print(views['technical'].shape)
-    print(views['aesthetic'].shape)
+
+    semantic_array = np.ascontiguousarray(views["semantic"].numpy())
+    print(semantic_array.shape)
+    technical_array = np.ascontiguousarray(views["technical"].numpy())
+    aesthetic_array = np.ascontiguousarray(views["aesthetic"].numpy())
+    semantic_tensor = ov.Tensor(semantic_array, shared_memory=True)
+    technical_tensor = ov.Tensor(technical_array, shared_memory=True)
+    aethetic_tensor = ov.Tensor(aesthetic_array, shared_memory=True)
+
+    input_data = {
+        'semantic': semantic_tensor,
+        'technical': technical_tensor,
+        'aesthetic': aethetic_tensor
+    }
+
+    for input_name, tensor in input_data.items():
+        infer_request.set_tensor(input_name, tensor)    
+    
+    """
+    INFERENCE
+    """
     t2 = time.time()
-    results = [r.mean().item() for r in evaluator(views["semantic"], views["technical"], views["aesthetic"])]
+    infer_request.start_async()
+    infer_request.wait()
+
+    ov_results = []
+    for output in compiled_model.outputs:
+        output_tensor = infer_request.get_tensor(output)
+        output_data = output_tensor.data
+        mean_value = output_data.mean().item()
+        ov_results.append(mean_value)
     t3 = time.time()
-    pred_score = fuse_results(results)
+    pred_score = fuse_results(ov_results)
     print(f"path, semantic score, technical score, aesthetic score, overall/final score")
     print(f'{args.video_path.split("/")[-1]},{pred_score["semantic"]:4f},{pred_score["technical"]:4f},{pred_score["aesthetic"]:4f},{pred_score["overall"]:4f}')
     
     print("sample views: {:.3f} seconds".format(t2 - t1))
-    print("pytorch inference: {:.3f} seconds".format(t3 - t2))
+    print("openvino inference: {:.3f} seconds".format(t3 - t2))
     
-    # ## tuple_input=True 
-    # evaluator1 = COVER(**opt["model"]["args"], tuple_input=True).to(device)
-    # state_dict = torch.load(opt["test_load_path"], map_location=device, weights_only=False)
-    
-    # # set strict=False here to avoid error of missing
-    # # weight of prompt_learner in clip-iqa+, cross-gate
-    # evaluator1.load_state_dict(state_dict['state_dict'], strict=False)
-    # evaluator1.eval()
-    # results1 = [r.mean().item() for r in evaluator1(views)]
-    # pred_score1 = fuse_results(results1)
-    # print(f"path, semantic score, technical score, aesthetic score, overall/final score")
-    # print(f'{args.video_path.split("/")[-1]},{pred_score1["semantic"]:4f},{pred_score1["technical"]:4f},{pred_score1["aesthetic"]:4f},{pred_score1["overall"]:4f}')
