@@ -14,7 +14,6 @@ from scipy import stats
 from sklearn.metrics import mean_squared_error
 from scipy.optimize import curve_fit
 from cover.datasets import UnifiedFrameSampler, spatial_temporal_view_decomposition
-from cover.models import COVER
 
 # use case
 # python evaluate_on_ytugc.py -o cover.yml -d cuda:3 --output result.csv -uh 0
@@ -63,6 +62,7 @@ def parse_args():
     parser.add_argument("-o", "--opt"   , type=str, default="./cover.yml", help="the option file")
     parser.add_argument('-d', "--device", type=str, default="cuda:0"     , help='CUDA device id')
     parser.add_argument("-t", "--target_set", type=str, default="val-ytugc", help="target_set")
+    parser.add_argument("-v", "--openvino", type=bool, default=False, help="use openvino inference or not")
     parser.add_argument(      "--output", type=str, default="ytugc.csv" , help='output file to store predict mos value')
     args = parser.parse_args()
     return args
@@ -81,13 +81,25 @@ if __name__ == '__main__':
     with open(args.opt, "r") as f:
         opt = yaml.safe_load(f)
     
+    if not torch.cuda.is_available():
+        args.device = "cpu"
+    
     ### Load COVER
-    evaluator = COVER(**opt["model"]["args"]).to(args.device)
-    state_dict = torch.load(opt["test_load_path"], map_location=args.device)
+    if args.openvino:
+        import openvino as ov
+        core = ov.Core()
+        compiled_model = core.compile_model("cover.xml")
+        infer_request = compiled_model.create_infer_request()
+        print("Finish compiling model!")
+    else:
+        ### Load COVER
+        from cover.models import COVER
+        evaluator = COVER(**opt["model"]["args"]).to(args.device)
+        state_dict = torch.load(opt["test_load_path"], map_location=args.device, weights_only=False)
 
-    # set strict=False here to avoid error of missing
-    # weight of prompt_learner in clip-iqa+, cross-gate
-    evaluator.load_state_dict(state_dict['state_dict'], strict=False)
+        # set strict=False here to avoid error of missing
+        # weight of prompt_learner in clip-iqa+, cross-gate
+        evaluator.load_state_dict(state_dict['state_dict'], strict=False)
 
     dopt = opt["data"][args.target_set]["args"]
     temporal_samplers = {}
@@ -101,7 +113,7 @@ if __name__ == '__main__':
 
     if args.target_set == 'val-livevqc':
         videos_dir = './datasets/LIVE_VQC/Video/'
-        datainfo = './datasets/LIVE_VQC/metainfo/LIVE_VQC_metadata.csv'
+        datainfo = './datasets/LIVE_VQC/LIVE_VQC_metadata.csv'
         df = pd.read_csv(datainfo)
         files = df['File'].tolist()
         mos = df['MOS'].tolist()
@@ -160,8 +172,33 @@ if __name__ == '__main__':
                     .transpose(0, 1)
                     .to(args.device)
                 )
+        if args.openvino:
+            semantic_array = np.ascontiguousarray(views["semantic"].numpy())
+            technical_array = np.ascontiguousarray(views["technical"].numpy())
+            aesthetic_array = np.ascontiguousarray(views["aesthetic"].numpy())
+            semantic_tensor = ov.Tensor(semantic_array.squeeze(), shared_memory=True)
+            technical_tensor = ov.Tensor(technical_array, shared_memory=True)
+            aethetic_tensor = ov.Tensor(aesthetic_array, shared_memory=True)
 
-        results = [r.mean().item() for r in evaluator(views)]
+            input_data = {
+                'semantic': semantic_tensor,
+                'technical': technical_tensor,
+                'aesthetic': aethetic_tensor
+            }
+
+            for input_name, tensor in input_data.items():
+                infer_request.set_tensor(input_name, tensor)
+            infer_request.start_async()
+            infer_request.wait()
+
+            results = []
+            for output in compiled_model.outputs:
+                output_tensor = infer_request.get_tensor(output)
+                output_data = output_tensor.data
+                mean_value = output_data.mean().item()
+                results.append(mean_value)
+        else:
+            results = [r.mean().item() for r in evaluator(views['semantic'], views['technical'], views['aesthetic'])]
 
     
         pre_overall[count] = fuse_results(results)['overall']
