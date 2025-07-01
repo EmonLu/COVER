@@ -128,7 +128,7 @@ def finetune_epoch(
 
         y = data["gt_label"].float().detach().to(device).unsqueeze(-1)
 
-        scores = model(video, inference=False, reduce_scores=False)
+        scores = model(video["semantic"], video["technical"], video["aesthetic"], inference=False, reduce_scores=False)
         if len(scores) > 1:
             y_pred = reduce(lambda x, y: x + y, scores)
         else:
@@ -150,17 +150,17 @@ def finetune_epoch(
             loss += (
                 p_loss_a + p_loss_b + p_loss_c + 0.3 * r_loss_a + 0.3 * r_loss_b + 0.3 * r_loss_c
             )  # + 0.2 * o_loss
-            wandb.log(
-                {
-                    "train/plcc_loss_a": p_loss_a.item(),
-                    "train/plcc_loss_b": p_loss_b.item(),
-                    "train/plcc_loss_c": p_loss_c.item(),
-                }
-            )
+        #     wandb.log(
+        #         {
+        #             "train/plcc_loss_a": p_loss_a.item(),
+        #             "train/plcc_loss_b": p_loss_b.item(),
+        #             "train/plcc_loss_c": p_loss_c.item(),
+        #         }
+        #     )
 
-        wandb.log(
-            {"train/total_loss": loss.item(),}
-        )
+        # wandb.log(
+        #     {"train/total_loss": loss.item(),}
+        # )
 
         loss.backward()
         optimizer.step()
@@ -255,14 +255,14 @@ def inference_set(
     k = kendallr(gt_labels, pr_labels)[0]
     r = np.sqrt(((gt_labels - pr_labels) ** 2).mean())
 
-    wandb.log(
-        {
-            f"val_{suffix}/SRCC-{suffix}": s,
-            f"val_{suffix}/PLCC-{suffix}": p,
-            f"val_{suffix}/KRCC-{suffix}": k,
-            f"val_{suffix}/RMSE-{suffix}": r,
-        }
-    )
+    # wandb.log(
+    #     {
+    #         f"val_{suffix}/SRCC-{suffix}": s,
+    #         f"val_{suffix}/PLCC-{suffix}": p,
+    #         f"val_{suffix}/KRCC-{suffix}": k,
+    #         f"val_{suffix}/RMSE-{suffix}": r,
+    #     }
+    # )
 
     del results, result  # , video, video_up
     torch.cuda.empty_cache()
@@ -295,14 +295,14 @@ def inference_set(
         min(best_r, r),
     )
 
-    wandb.log(
-        {
-            f"val_{suffix}/best_SRCC-{suffix}": best_s,
-            f"val_{suffix}/best_PLCC-{suffix}": best_p,
-            f"val_{suffix}/best_KRCC-{suffix}": best_k,
-            f"val_{suffix}/best_RMSE-{suffix}": best_r,
-        }
-    )
+    # wandb.log(
+    #     {
+    #         f"val_{suffix}/best_SRCC-{suffix}": best_s,
+    #         f"val_{suffix}/best_PLCC-{suffix}": best_p,
+    #         f"val_{suffix}/best_KRCC-{suffix}": best_k,
+    #         f"val_{suffix}/best_RMSE-{suffix}": best_r,
+    #     }
+    # )
 
     print(
         f"For {len(inf_loader)} videos, \nthe accuracy of the model: [{suffix}] is as follows:\n  SROCC: {s:.4f} best: {best_s:.4f} \n  PLCC:  {p:.4f} best: {best_p:.4f}  \n  KROCC: {k:.4f} best: {best_k:.4f} \n  RMSE:  {r:.4f} best: {best_r:.4f}."
@@ -400,16 +400,16 @@ def main():
                 pin_memory=True,
             )
 
-        run = wandb.init(
-            project=opt["wandb"]["project_name"],
-            name=opt["name"] + f"_target_{args.target_set}_split_{split}"
-            if num_splits > 1
-            else opt["name"],
-            reinit=True,
-            settings=wandb.Settings(start_method="thread"),
-        )
+        # run = wandb.init(
+        #     project=opt["wandb"]["project_name"],
+        #     name=opt["name"] + f"_target_{args.target_set}_split_{split}"
+        #     if num_splits > 1
+        #     else opt["name"],
+        #     reinit=True,
+        #     settings=wandb.Settings(start_method="thread"),
+        # )
 
-        state_dict = torch.load(opt["test_load_path"], map_location=device)
+        state_dict = torch.load(opt["test_load_path"], map_location=device, weights_only=False)
 
         # Load fine_tuned header from checkpoint
         if args.usehead:
@@ -438,19 +438,19 @@ def main():
                 param_groups += [
                     {
                         "params": value.parameters(),
-                        "lr": opt["optimizer"]["lr"]
-                        * opt["optimizer"]["backbone_lr_mult"],
+                        "lr": float(opt["optimizer"]["lr"])
+                        * float(opt["optimizer"]["backbone_lr_mult"]),
                     }
                 ]
             else:
                 param_groups += [
-                    {"params": value.parameters(), "lr": opt["optimizer"]["lr"]}
+                    {"params": value.parameters(), "lr": float(opt["optimizer"]["lr"])}
                 ]
 
         optimizer = torch.optim.AdamW(
-            lr=opt["optimizer"]["lr"],
+            lr=float(opt["optimizer"]["lr"]),
             params=param_groups,
-            weight_decay=opt["optimizer"]["wd"],
+            weight_decay=float(opt["optimizer"]["wd"]),
         )
         warmup_iter = 0
         for train_loader in train_loaders.values():
@@ -609,7 +609,7 @@ def main():
                 for param in value.parameters():
                     param.requires_grad = True
 
-        run.finish()
+        # run.finish()
 
 
 if __name__ == "__main__":

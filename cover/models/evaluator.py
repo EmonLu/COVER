@@ -128,36 +128,118 @@ class COVER(nn.Module):
         **kwargs
     ):
         # assert (return_pooled_feats & return_raw_feats) == False, "Please only choose one kind of features to return"
-        self.eval()
-        with torch.no_grad():
+        if inference:    
+            self.eval()
+            with torch.no_grad():
+                scores = []
+                feats = {}
+                times = {}
+                
+                ## ---------semantic branch---------------
+                start_time_semantic = time.time()
+                x = semantic.squeeze(0)
+                x = x.permute(1,0,2,3)
+                feat, _ = getattr(self, "semantic_backbone")(
+                    x, multi=self.multi, layer=self.layer, **kwargs
+                )
+                # for image feature from clipiqa+ VIT14
+                # image feature shape (t, c) -> (16, 768)
+                feat = feat.permute(1,0).contiguous() # (c, t) -> (768, 16)
+                feat = feat.unsqueeze(-1).unsqueeze(-1) # (c, t, w, h) -> (768, 16, 1, 1)
+                feat_expand = feat.expand(-1, -1, 7, 7) # (c, t, w, h) -> (768, 16, 7, 7)
+                feat_expand = feat_expand.unsqueeze(0) # (b, c, t, w, h) -> (1, 768, 16, 7, 7)
+                if hasattr(self, "semantic_head"):
+                    score = getattr(self, "semantic_head")(feat_expand)
+                else:
+                    score = getattr(self, "vqa_head")(feat_expand)
+                scores += [score]
+                feats["semantic"] = feat_expand
+                end_time_semantic = time.time()
+                times['semantic'] = end_time_semantic - start_time_semantic
+                
+                ## ---------technical branch---------------
+                start_time_technical = time.time()
+                # if input is image, copy its data
+                if technical.shape[2] == 1:
+                    x = torch.cat([technical, technical], dim=2)
+                else:
+                    x = technical
+                feat = getattr(self, "technical_backbone")(
+                    x, multi=self.multi, layer=self.layer, **kwargs
+                )
+                feat_gated = self.smtc_gate_tech(feats['semantic'], feat)
+                if hasattr(self, "technical_head"):
+                    scores += [getattr(self, "technical_head")(feat_gated)]
+                else:
+                    scores += [getattr(self, "vqa_head")(feat_gated)]
+                end_time_technical = time.time()
+                times['technical'] = end_time_technical - start_time_technical
+                
+                ## ---------aesthetic branch---------------
+                start_time_aesthetic = time.time()
+                # if input is image, copy its data
+                if aesthetic.shape[2] == 1:
+                    x = torch.cat([aesthetic, aesthetic], dim=2)
+                else:
+                    x = aesthetic
+                feat = getattr(self, "aesthetic_backbone")(
+                    x, multi=self.multi, layer=self.layer, **kwargs
+                )
+                feat_gated = self.smtc_gate_aesc(feats['semantic'], feat)
+                if hasattr(self, "aesthetic_head"):
+                    scores += [getattr(self, "aesthetic_head")(feat_gated)]
+                else:
+                    scores += [getattr(self, "vqa_head")(feat_gated)]
+                end_time_aesthetic = time.time()
+                times['aesthetic'] = end_time_aesthetic - start_time_aesthetic
+                
+                for key, duration in times.items():
+                    print(f"{key} branch execution time: {duration:.4f} seconds")
+            if reduce_scores:
+                if len(scores) > 1:
+                    scores = reduce(lambda x, y: x + y, scores)
+                else:
+                    scores = scores[0]
+                if pooled:
+                    scores = torch.mean(scores, (1, 2, 3, 4))
+            self.train()
+            if return_pooled_feats or return_raw_feats:
+                return scores, feats
+            return scores
+        else:
+            self.train()
             scores = []
             feats = {}
-            times = {}
-            
             ## ---------semantic branch---------------
-            start_time_semantic = time.time()
-            x = semantic.squeeze(0)
-            x = x.permute(1,0,2,3)
-            feat, _ = getattr(self, "semantic_backbone")(
-                x, multi=self.multi, layer=self.layer, **kwargs
-            )
-            # for image feature from clipiqa+ VIT14
-            # image feature shape (t, c) -> (16, 768)
-            feat = feat.permute(1,0).contiguous() # (c, t) -> (768, 16)
-            feat = feat.unsqueeze(-1).unsqueeze(-1) # (c, t, w, h) -> (768, 16, 1, 1)
-            feat_expand = feat.expand(-1, -1, 7, 7) # (c, t, w, h) -> (768, 16, 7, 7)
-            feat_expand = feat_expand.unsqueeze(0) # (b, c, t, w, h) -> (1, 768, 16, 7, 7)
-            if hasattr(self, "semantic_head"):
-                score = getattr(self, "semantic_head")(feat_expand)
-            else:
-                score = getattr(self, "vqa_head")(feat_expand)
-            scores += [score]
-            feats["semantic"] = feat_expand
-            end_time_semantic = time.time()
-            times['semantic'] = end_time_semantic - start_time_semantic
+            scores_semantic_list = []
+            feats_semantic_list = []
+            for batch_idx in range(semantic.shape[0]):
+                x = semantic[batch_idx].squeeze(0)
+                x =  x.permute(1,0,2,3)
+                feat, _ = getattr(self, "semantic_backbone")(
+                    x, multi=self.multi, layer=self.layer, **kwargs
+                )
+                # for image feature from clipiqa+ VIT14
+                # image feature shape (t, c) -> (16, 768)
+                feat = feat.permute(1,0).contiguous() # (c, t) -> (768, 16)
+                feat = feat.unsqueeze(-1).unsqueeze(-1) # (c, t, w, h) -> (768, 16, 1, 1)
+                feat_expand = feat.expand(-1, -1, 7, 7) # (c, t, w, h) -> (768, 16, 7, 7)
+                feats_semantic_list.append(feat_expand)
+                if hasattr(self, "semantic_head"):
+                    feat_expand = feat_expand.unsqueeze(0) # (b, c, t, w, h) -> (1, 768, 16, 7, 7)
+                    score = getattr(self, "semantic_head")(feat_expand)
+                    score = score.squeeze(0)
+                    scores_semantic_list.append(score)
+                else:
+                    feat_expand = feat_expand.unsqueeze(0) # (b, c, t, w, h) -> (1, 768, 16, 7, 7)
+                    score = getattr(self, "vqa_head")(feat_expand)
+                    score = score.squeeze(0)
+                    scores_semantic_list.append(score)
+            scores_semantic_tensor = torch.stack(scores_semantic_list)
+            feats["semantic"] = torch.stack(feats_semantic_list)
+            scores += [scores_semantic_tensor]
             
             ## ---------technical branch---------------
-            start_time_technical = time.time()
             # if input is image, copy its data
             if technical.shape[2] == 1:
                 x = torch.cat([technical, technical], dim=2)
@@ -171,11 +253,8 @@ class COVER(nn.Module):
                 scores += [getattr(self, "technical_head")(feat_gated)]
             else:
                 scores += [getattr(self, "vqa_head")(feat_gated)]
-            end_time_technical = time.time()
-            times['technical'] = end_time_technical - start_time_technical
             
             ## ---------aesthetic branch---------------
-            start_time_aesthetic = time.time()
             # if input is image, copy its data
             if aesthetic.shape[2] == 1:
                 x = torch.cat([aesthetic, aesthetic], dim=2)
@@ -189,22 +268,20 @@ class COVER(nn.Module):
                 scores += [getattr(self, "aesthetic_head")(feat_gated)]
             else:
                 scores += [getattr(self, "vqa_head")(feat_gated)]
-            end_time_aesthetic = time.time()
-            times['aesthetic'] = end_time_aesthetic - start_time_aesthetic
-            
-            for key, duration in times.items():
-                print(f"{key} branch execution time: {duration:.4f} seconds")
-        if reduce_scores:
-            if len(scores) > 1:
-                scores = reduce(lambda x, y: x + y, scores)
-            else:
-                scores = scores[0]
-            if pooled:
-                scores = torch.mean(scores, (1, 2, 3, 4))
-        self.train()
-        if return_pooled_feats or return_raw_feats:
-            return scores, feats
-        return scores
+                
+            if reduce_scores:
+                if len(scores) > 1:
+                    scores = reduce(lambda x, y: x + y, scores)
+                else:
+                    scores = scores[0]
+                if pooled:
+                    print(scores.shape)
+                    scores = torch.mean(scores, (1, 2, 3, 4))
+                    print(scores.shape)
+
+            if return_pooled_feats:
+                return scores, feats
+            return scores
         
     ## backup for compare rewritten version(tuple_input) and original dictionary input
     def forward_dict_input(
