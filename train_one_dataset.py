@@ -23,6 +23,15 @@ import copy
 import cover.models as models
 import cover.datasets as datasets
 
+import logging
+
+# 设置日志记录格式和级别
+logging.basicConfig(
+        filename='training.log',  # 日志文件名
+        level=logging.INFO,       # 日志级别
+        format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+
 
 def train_test_split(dataset_path, ann_file, ratio=0.8, seed=42):
     random.seed(seed)
@@ -119,6 +128,7 @@ def finetune_epoch(
     need_separate_sup=True,
 ):
     model.train()
+    logging.info(f"Starting epoch {epoch} for finetuning.")
     for i, data in enumerate(tqdm(ft_loader, desc=f"Training in epoch {epoch}")):
         optimizer.zero_grad()
         video = {}
@@ -161,7 +171,8 @@ def finetune_epoch(
         # wandb.log(
         #     {"train/total_loss": loss.item(),}
         # )
-
+        logging.info(f"Epoch {epoch}, Batch {i}: PLCC Loss A: {p_loss_a.item()}, B: {p_loss_b.item()}, C: {p_loss_c.item()}")
+        
         loss.backward()
         optimizer.step()
         scheduler.step()
@@ -176,6 +187,7 @@ def finetune_epoch(
                     model_params[k].data, alpha=1 - 0.999
                 )
     model.eval()
+    logging.info(f"Finished epoch {epoch} for finetuning.")
 
 
 def profile_inference(inf_set, model, device):
@@ -202,7 +214,7 @@ def inference_set(
     save_name="divide",
     save_type="head",
 ):
-
+    logging.info(f"Starting inference for {suffix}.")
     results = []
 
     best_s, best_p, best_k, best_r = best_
@@ -237,9 +249,10 @@ def inference_set(
                 )
             # .unsqueeze(0)
         with torch.no_grad():
-            result["pr_labels"] = model(video, reduce_scores=True).cpu().numpy()
+            result["pr_labels"] = model(video["semantic"], video["technical"], video["aesthetic"],reduce_scores=True).cpu().numpy()
             if len(list(video_up.keys())) > 0:
-                result["pr_labels_up"] = model(video_up).cpu().numpy()
+                print("Inference video_up!!")
+                result["pr_labels_up"] = model(video_up["semantic"], video_up["technical"], video_up["aesthetic"]).cpu().numpy()
 
         result["gt_label"] = data["gt_label"].item()
         del video, video_up
@@ -263,7 +276,7 @@ def inference_set(
     #         f"val_{suffix}/RMSE-{suffix}": r,
     #     }
     # )
-
+    logging.info(f"Inference results for {suffix}: SROCC: {s:.4f}, PLCC: {p:.4f}, KROCC: {k:.4f}, RMSE: {r:.4f}")
     del results, result  # , video, video_up
     torch.cuda.empty_cache()
 
@@ -282,11 +295,17 @@ def inference_set(
                 {"state_dict": head_state_dict, "validation_results": best_,},
                 f"pretrained_weights/{save_name}_{suffix}_finetuned.pth",
             )
+            logging.info(f"Model saved to pretrained_weights/{save_name}_{suffix}_finetuned.pth (head_only)")
+            logging.info(f"Best Performance Metrics: SROCC: {s:.4f}, PLCC: {p:.4f}, "
+                                         f"KROCC: {k:.4f}, RMSE: {r:.4f}")
         else:
             torch.save(
                 {"state_dict": state_dict, "validation_results": best_,},
                 f"pretrained_weights/{save_name}_{suffix}_finetuned.pth",
             )
+            logging.info(f"Model saved to pretrained_weights/{save_name}_{suffix}_finetuned.pth")
+            logging.info(f"Best Performance Metrics: SROCC: {s:.4f}, PLCC: {p:.4f}, "
+                                         f"KROCC: {k:.4f}, RMSE: {r:.4f}")
 
     best_s, best_p, best_k, best_r = (
         max(best_s, s),
@@ -303,6 +322,7 @@ def inference_set(
     #         f"val_{suffix}/best_RMSE-{suffix}": best_r,
     #     }
     # )
+    logging.info(f"Finished inference for {suffix}. Best results: SROCC: {best_s:.4f}, PLCC: {best_p:.4f}, KROCC: {best_k:.4f}, RMSE: {best_r:.4f}")
 
     print(
         f"For {len(inf_loader)} videos, \nthe accuracy of the model: [{suffix}] is as follows:\n  SROCC: {s:.4f} best: {best_s:.4f} \n  PLCC:  {p:.4f} best: {best_p:.4f}  \n  KROCC: {k:.4f} best: {best_k:.4f} \n  RMSE:  {r:.4f} best: {best_r:.4f}."
@@ -314,7 +334,7 @@ def inference_set(
 
 
 def main():
-
+    logging.info("Starting training process.")
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-o", "--opt", type=str, default="cover.yml", help="the option file"
@@ -476,6 +496,7 @@ def main():
                     param.requires_grad = False
 
         for epoch in range(opt["l_num_epochs"]):
+            logging.info(f"Starting linear epoch {epoch}.")
             print(f"Linear Epoch {epoch}:")
             for key, train_loader in train_loaders.items():
                 finetune_epoch(
@@ -518,8 +539,7 @@ def main():
 
         if opt["l_num_epochs"] >= 0:
             for key in val_loaders:
-                print(
-                    f"""For the linear transfer process on {key} with {len(val_loaders[key])} videos,
+                print(f"""For the linear transfer process on {key} with {len(val_loaders[key])} videos,
                     the best validation accuracy of the model-s is as follows:
                     SROCC: {bests[key][0]:.4f}
                     PLCC:  {bests[key][1]:.4f}
@@ -535,6 +555,8 @@ def main():
                     KROCC: {bests_n[key][2]:.4f}
                     RMSE:  {bests_n[key][3]:.4f}."""
                 )
+                logging.info(f"For the linear transfer process on {key} with {len(val_loaders[key])} videos,the best validation accuracy of the model-s is as follows: SROCC: {bests[key][0]:.4f}\nPLCC:  {bests[key][1]:.4f}\nKROCC: {bests[key][2]:.4f}\nRMSE:  {bests[key][3]:.4f}.")
+                logging.info(f"For the linear transfer process on {key} with {len(val_loaders[key])} videos,the best validation accuracy of the model-n is as follows: SROCC: {bests_n[key][0]:.4f}\nPLCC:  {bests_n[key][1]:.4f}\nKROCC: {bests_n[key][2]:.4f}\nRMSE:  {bests_n[key][3]:.4f}.")
 
         for key, value in dict(model.named_children()).items():
             if "backbone" in key:
@@ -542,6 +564,7 @@ def main():
                     param.requires_grad = True
 
         for epoch in range(opt["num_epochs"]):
+            logging.info(f"Starting end-to-end epoch {epoch}.")
             print(f"End-to-end Epoch {epoch}:")
             for key, train_loader in train_loaders.items():
                 finetune_epoch(
@@ -603,6 +626,8 @@ def main():
                     KROCC: {bests_n[key][2]:.4f}
                     RMSE:  {bests_n[key][3]:.4f}."""
                 )
+                logging.info(f"For the end-to-end transfer process on {key} with {len(val_loaders[key])} videos,the best validation accuracy of the model-s is as follows: SROCC: {bests[key][0]:.4f}\nPLCC:  {bests[key][1]:.4f}\nKROCC: {bests[key][2]:.4f}\nRMSE:  {bests[key][3]:.4f}.")
+                logging.info(f"For the end-to-end transfer process on {key} with {len(val_loaders[key])} videos,the best validation accuracy of the model-n is as follows: SROCC: {bests_n[key][0]:.4f}\nPLCC:  {bests_n[key][1]:.4f}\nKROCC: {bests_n[key][2]:.4f}\nRMSE:  {bests_n[key][3]:.4f}.")
 
         for key, value in dict(model.named_children()).items():
             if "backbone" in key:
@@ -610,6 +635,7 @@ def main():
                     param.requires_grad = True
 
         # run.finish()
+        logging.info("Finished training process.")
 
 
 if __name__ == "__main__":
