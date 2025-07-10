@@ -54,7 +54,7 @@ if __name__ == "__main__":
 
     ### Load COVER
     evaluator = COVER(**opt["model"]["args"]).to(args.device)
-    state_dict = torch.load(opt["test_load_path"], map_location=args.device)
+    state_dict = torch.load(opt["test_load_path"], map_location=args.device, weights_only=False)
     
     # set strict=False here to avoid error of missing
     # weight of prompt_learner in clip-iqa+, cross-gate
@@ -67,7 +67,7 @@ if __name__ == "__main__":
     with open(args.output, "w") as w:
         w.write(f"path, semantic score, technical score, aesthetic score, overall/final score\n")
 
-    dopt = opt["data"]["val-l1080p"]["args"]
+    dopt = opt["data"]["val-ytugc"]["args"]
 
     dopt["anno_file"] = None
     dopt["data_prefix"] = args.input_video_dir
@@ -102,7 +102,7 @@ if __name__ == "__main__":
                 )
     
         with torch.no_grad():
-            results = evaluator(video, reduce_scores=False)
+            results = evaluator(video["semantic"], video["technical"], video["aesthetic"], reduce_scores=False)
             results = [np.mean(l.cpu().numpy()) for l in results]
 
         rescaled_results = fuse_results(results)
