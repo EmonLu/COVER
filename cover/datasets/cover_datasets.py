@@ -15,7 +15,10 @@ from decord import VideoReader, cpu, gpu
 from PIL import Image
 from tqdm import tqdm
 
-random.seed(42)
+seed = 42
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
 
 decord.bridge.set_bridge("torch")
 
@@ -274,12 +277,6 @@ def spatial_temporal_view_decomposition(
     for stype, sopt in sample_types.items():
         sampled_video[stype] = get_single_view(video[stype], stype, **sopt)
     return sampled_video, frame_inds
-
-
-import random
-
-import numpy as np
-
 
 class UnifiedFrameSampler:
     def __init__(

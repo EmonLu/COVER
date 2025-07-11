@@ -16,6 +16,8 @@ from cover.datasets import (
 )
 from cover.models import COVER
 
+np.random.seed(42)
+
 mean, std = (
     torch.FloatTensor([123.675, 116.28, 103.53]),
     torch.FloatTensor([58.395, 57.12, 57.375]),
@@ -59,6 +61,7 @@ if __name__ == "__main__":
     # set strict=False here to avoid error of missing
     # weight of prompt_learner in clip-iqa+, cross-gate
     evaluator.load_state_dict(state_dict['state_dict'], strict=False)
+    evaluator.eval()
 
 
     video_paths = []
