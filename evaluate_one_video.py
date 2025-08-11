@@ -44,6 +44,7 @@ class ScoreNormalizer:
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("-o", "--opt"   , type=str, default="./cover.yml", help="the option file")
+    parser.add_argument('-d', "--device", type=str, default="cuda"       , help='CUDA device id')
     parser.add_argument("-v", "--video_path", type=str, default="./demo/video_1.mp4" , help='output file to store predict mos value')
     parser.add_argument("-m", "--mode", type=str, choices=["inference", "throughput"], default="inference",
                         help="choose to run 'inference' (default) or 'throughput' benchmark")
@@ -58,11 +59,15 @@ if __name__ == "__main__":
     """
     BASIC SETTINGS
     """
-    if torch.cuda.is_available():
+    if args.device == "cpu":
+        device = torch.device("cpu")
+    
+    if args.device == "cuda":
         torch.cuda.current_device()
         torch.cuda.empty_cache()
         torch.backends.cudnn.benchmark = True
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda")
+
     with open(args.opt, "r") as f:
        opt = yaml.safe_load(f)
     
