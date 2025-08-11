@@ -11,7 +11,8 @@ import yaml
 from cover.datasets import UnifiedFrameSampler, spatial_temporal_view_decomposition
 from cover.models import COVER
 import time
-import openvino as ov 
+import openvino as ov
+from scipy.special import expit
 
 mean, std = (
     torch.FloatTensor([123.675, 116.28, 103.53]),
@@ -32,26 +33,38 @@ def fuse_results(results: list):
         "overall"  : x,
     }
 
+class ScoreNormalizer:
+    def __init__(self, mean: float, std: float):
+        self.mean = mean
+        self.std = std if std > 0 else 1e-6  # 防止除以 0
+
+    def normalize(self, score: float) -> float:
+        standardized = (score - self.mean) / self.std
+        return float(expit(standardized))  # sigmoid 归一化到 0~1
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("-o", "--opt"   , type=str, default="./cover.yml", help="the option file")
     parser.add_argument("-v", "--video_path", type=str, default="./demo/video_1.mp4" , help='output file to store predict mos value')
+    parser.add_argument("-m", "--mode", type=str, choices=["inference", "throughput"], default="inference",
+                        help="choose to run 'inference' (default) or 'throughput' benchmark")
     args = parser.parse_args()
     return args
 
 if __name__ == "__main__":
 
     args = parse_args()
+    normalizer = ScoreNormalizer(-0.46472087, 0.79736321)
 
     """
     BASIC SETTINGS
     """
-    if torch.cuda.is_available():
-        torch.cuda.current_device()
-        torch.cuda.empty_cache()
-        torch.backends.cudnn.benchmark = True
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # if torch.cuda.is_available():
+    #     torch.cuda.current_device()
+    #     torch.cuda.empty_cache()
+    #     torch.backends.cudnn.benchmark = True
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = "cpu"
     with open(args.opt, "r") as f:
        opt = yaml.safe_load(f)
     
@@ -121,21 +134,52 @@ if __name__ == "__main__":
     """
     INFERENCE
     """
-    t2 = time.time()
-    infer_request.start_async()
-    infer_request.wait()
+    if args.mode == "inference":
+        t2 = time.time()
+        infer_request.start_async()
+        infer_request.wait()
 
-    ov_results = []
-    for output in compiled_model.outputs:
-        output_tensor = infer_request.get_tensor(output)
-        output_data = output_tensor.data
-        mean_value = output_data.mean().item()
-        ov_results.append(mean_value)
-    t3 = time.time()
-    pred_score = fuse_results(ov_results)
-    print(f"path, semantic score, technical score, aesthetic score, overall/final score")
-    print(f'{args.video_path.split("/")[-1]},{pred_score["semantic"]:4f},{pred_score["technical"]:4f},{pred_score["aesthetic"]:4f},{pred_score["overall"]:4f}')
+        ov_results = []
+        for output in compiled_model.outputs:
+            output_tensor = infer_request.get_tensor(output)
+            output_data = output_tensor.data
+            mean_value = output_data.mean().item()
+            ov_results.append(mean_value)
+        t3 = time.time()
+        pred_score = fuse_results(ov_results)
+        regularized = normalizer.normalize(pred_score["overall"])
+        print(f"path\tsemantic score\ttechnical score\taesthetic score\toverall/final score\tregularized")
+        print(f'{args.video_path.split("/")[-1]}\t{pred_score["semantic"]:4f}\t{pred_score["technical"]:4f}\t{pred_score["aesthetic"]:4f}\t{pred_score["overall"]:4f}\t{regularized:4f}')
     
-    print("sample views: {:.3f} seconds".format(t2 - t1))
-    print("openvino inference: {:.3f} seconds".format(t3 - t2))
-    
+        print("sample views: {:.3f} seconds".format(t2 - t1))
+        print("openvino inference: {:.3f} seconds".format(t3 - t2))
+    elif args.mode == "throughput":
+        warmup = 10
+        iterations = 100
+
+        # warmup（不计入统计）
+        for _ in range(warmup):
+            for input_name, tensor in input_data.items():
+                infer_request.set_tensor(input_name, tensor)
+            infer_request.start_async()
+            infer_request.wait()
+            for output in compiled_model.outputs:
+                _ = infer_request.get_tensor(output).data
+
+        # 正式计时
+        t_start = time.time()
+        for _ in range(iterations):
+            for input_name, tensor in input_data.items():
+                infer_request.set_tensor(input_name, tensor)  # 包含 set_tensor
+            infer_request.start_async()
+            infer_request.wait()
+            for output in compiled_model.outputs:
+                _ = infer_request.get_tensor(output).data  # 包含 get_tensor
+        t_end = time.time()
+
+        total_time = t_end - t_start
+        throughput = iterations / total_time
+
+        print(f"[Throughput Test] iterations={iterations}, warmup={warmup}")
+        print(f"Total time: {total_time:.3f} s")
+        print(f"Throughput: {throughput:.3f} samples/s")

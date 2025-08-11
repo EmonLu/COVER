@@ -247,7 +247,8 @@ def spatial_temporal_view_decomposition(
             imgs = [torch.from_numpy(ovideo[idx]) for idx in frame_inds]
             video[stype] = torch.stack(imgs, 0).permute(3, 0, 1, 2)
         del ovideo
-    elif video_path.endswith(".mp4"):
+#    elif video_path.endswith(".mkv"):
+    elif video_path.endswith(('.mkv','.mp4')):
         decord.bridge.set_bridge("torch")
         vreader = VideoReader(video_path)
         ### Avoid duplicated video decoding!!! Important!!!!
@@ -399,7 +400,8 @@ class ViewDecompositionDataset(torch.utils.data.Dataset):
                 video_filenames = []
                 for (root, dirs, files) in os.walk(self.data_prefix, topdown=True):
                     for file in files:
-                        if file.endswith(".mp4"):
+#                        if file.endswith(".mkv"):
+                        if file.endswith(('.mkv','.mp4')):
                             video_filenames += [os.path.join(root, file)]
                 print(len(video_filenames))
                 video_filenames = sorted(video_filenames)

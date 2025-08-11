@@ -15,6 +15,7 @@ from cover.datasets import (
     spatial_temporal_view_decomposition,
 )
 from cover.models import COVER
+from scipy.special import expit
 
 np.random.seed(42)
 
@@ -37,6 +38,16 @@ def fuse_results(results: list):
         "overall"  : x,
     }
 
+class ScoreNormalizer:
+    def __init__(self, mean: float, std: float):
+        self.mean = mean
+        self.std = std if std > 0 else 1e-6  # 防止除以 0
+
+    def normalize(self, score: float) -> float:
+        standardized = (score - self.mean) / self.std
+        return float(expit(standardized))  # sigmoid 归一化到 0~1
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("-o", "--opt"   , type=str, default="./cover.yml", help="the option file")
@@ -50,6 +61,7 @@ def parse_args():
 if __name__ == "__main__":
 
     args = parse_args()
+    normalizer = ScoreNormalizer(-0.46472087, 0.79736321)
 
     with open(args.opt, "r") as f:
         opt = yaml.safe_load(f)
@@ -68,7 +80,7 @@ if __name__ == "__main__":
     all_results = {}
 
     with open(args.output, "w") as w:
-        w.write(f"path, semantic score, technical score, aesthetic score, overall/final score\n")
+        w.write(f"path, semantic score, technical score, aesthetic score, overall/final score, regularized\n")
 
     dopt = opt["data"]["val-ytugc"]["args"]
 
@@ -109,6 +121,7 @@ if __name__ == "__main__":
             results = [np.mean(l.cpu().numpy()) for l in results]
 
         rescaled_results = fuse_results(results)
+        regularized = normalizer.normalize(rescaled_results["overall"])
         # all_results[data["name"][0]] = rescaled_results
 
         # with open(
@@ -118,5 +131,5 @@ if __name__ == "__main__":
         
         with open(args.output, "a") as w:
             w.write(
-                f'{data["name"][0].split("/")[-1]},{rescaled_results["semantic"]:4f},{rescaled_results["technical"]:4f},{rescaled_results["aesthetic"]:4f},{rescaled_results["overall"]:4f}\n'
+                f'{data["name"][0].split("/")[-1]},{rescaled_results["semantic"]:4f},{rescaled_results["technical"]:4f},{rescaled_results["aesthetic"]:4f},{rescaled_results["overall"]:4f},{regularized:4f}\n'
             )
