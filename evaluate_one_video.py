@@ -140,13 +140,15 @@ if __name__ == "__main__":
         with torch.no_grad():
             for _ in range(warmup):
                 _ = evaluator(semantic, technical, aesthetic)
-    
-        torch.cuda.synchronize()
+        
+        if args.device == "cuda":
+            torch.cuda.synchronize()
         start = time.time()
         with torch.no_grad():
             for _ in range(num_iterations):
                 _ = evaluator(semantic, technical, aesthetic)
-        torch.cuda.synchronize()
+        if args.device == "cuda":
+            torch.cuda.synchronize()
         end = time.time()
 
         elapsed = end - start
